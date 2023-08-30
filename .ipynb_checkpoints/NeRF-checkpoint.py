@@ -22,7 +22,7 @@ class NeRFManager():
 		self.focalLength = focalLength
 		self.numberOfSamples = 25
 		self.far = 5
-		self.numberOfFor = 6
+		self.numberOfFor = 5
 		self.model = NeRfModel(self.numberOfFor).to(device)
 		self.dataSet = NerfDataSet(poses, images)
 		self.dataLoader = DataLoader(dataset=self.dataSet, batch_size=4, shuffle=True )
@@ -43,7 +43,7 @@ class NeRFManager():
 			rotationMatrix = pose[0:3, 0:3]
 			rotatedDirections = torch.matmul(directionVectors, rotationMatrix)
 
-			origin =  pose[:3, 3]
+			origin =  pose[:3, 2]
 
 			# all the rays have the same origin
 			originTensor =  torch.broadcast_to(origin, rotatedDirections.shape)
