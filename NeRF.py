@@ -39,9 +39,9 @@ class NeRFManager():
 			z = torch.ones_like(x)  # z coords in a [width, height] tensor
 
 			# match up each element of the 3 tensors (thats why using dim = 2)
-			directionVectors = torch.stack((xShifted, yShifted, z), dim=2).to(device)
+			directionVectors = torch.stack((xShifted, -yShifted, -z), dim=2).to(device)
 			rotationMatrix = pose[0:3, 0:3]
-			rotatedDirections = torch.matmul(directionVectors, rotationMatrix)
+			rotatedDirections = torch.sum(directionVectors.unsqueeze(2)*rotationMatrix, dim=-1)
 
 			origin =  pose[:3, 3]
 
@@ -58,7 +58,7 @@ class NeRFManager():
 		# We want to instead have a list of numberOfSamples for each pixel, so (width, height, numberOfSamples, 3)
 		dirs = dirs.reshape(self.width, self.height, 1, 3)
 		pos = pos.reshape(self.width, self.height, 1, 3)
-		z = pos - t*dirs
+		z = pos + t*dirs
 		z = z.to(device)
 		return z
 
