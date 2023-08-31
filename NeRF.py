@@ -58,7 +58,7 @@ class NeRFManager():
 		# We want to instead have a list of numberOfSamples for each pixel, so (width, height, numberOfSamples, 3)
 		dirs = dirs.reshape(self.width, self.height, 1, 3)
 		pos = pos.reshape(self.width, self.height, 1, 3)
-		z = pos + t*dirs
+		z = pos - t*dirs
 		z = z.to(device)
 		return z
 
