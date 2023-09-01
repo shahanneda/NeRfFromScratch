@@ -8,15 +8,18 @@ from torch import tensor
 
 data = np.load('tiny_nerf_data.npz')
 images = torch.tensor(data['images'])
-poses = torch.tensor(data['poses'])
-focalLength = data['focal']
 
-poses[12]
-print(images.shape)
-print(poses.shape)
+trainingImages = images[0:100]
+valImages = images[100:]
+
+poses = torch.tensor(data['poses'])
+trainingPoses = poses[0:100]
+valPoses = poses[100:]
+
+focalLength = data['focal']
 
 width = images.shape[1]
 height = images.shape[2]
 
-nerf = NeRFManager(images, poses, focalLength, numberOfSamples=25, far=5)
+nerf = NeRFManager(trainingImages, trainingPoses, focalLength, numberOfSamples=64, far=6, valImages=valImages, valPoses=valPoses)
 nerf.train(epochs=10000)

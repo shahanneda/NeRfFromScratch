@@ -12,22 +12,51 @@ from Model import NeRfModel
 from Dataset import NerfDataSet
 from tqdm import tqdm
 from IPython.display import clear_output
+import wandb
+
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class NeRFManager():
-	def __init__(self, images, poses, focalLength: float, numberOfSamples: int = 25, far: float = 5):
+	def __init__(self, images, poses, focalLength: float, numberOfSamples: int, near: float = 2, far: float = 6, valImages = None, valPoses = None):
+		assert(len(images) == len(poses))
+		assert(len(valImages) == len(valPoses))
+
 		self.width = images.shape[1]
 		self.height = images.shape[2]
 		self.focalLength = focalLength
-		self.numberOfSamples = 25
-		self.far = 5
+		self.numberOfSamples = numberOfSamples
+		self.near = near
+		self.far = far
 		self.numberOfFor = 6
-		self.model = NeRfModel(self.numberOfFor).to(device)
+		self.layerSize = 256
+		self.numberOfLayers = 8
+		self.model = NeRfModel(self.numberOfFor, layer_size=self.layerSize, number_of_layers=self.numberOfLayers).to(device)
 		self.dataSet = NerfDataSet(poses, images)
-		self.dataLoader = DataLoader(dataset=self.dataSet, batch_size=4, shuffle=True )
+		self.dataLoader = DataLoader(dataset=self.dataSet, batch_size=2, shuffle=True )
+		self.valImages = valImages
+		self.valPoses = valPoses
 
-	def getRays(self, pose):
+		self.setup_weights_and_bias()
+
+
+
+	def setup_weights_and_bias(self):
+		wandb.init(
+			# set the wandb project where this run will be logged
+			project="NerfFromScratch",
+			
+			# track hyperparameters and run metadata
+			config={
+			"number_of_fourier": self.numberOfFor,
+			"number_of_samples": self.numberOfSamples,
+			"layer_size": self.layerSize,
+			"number_of_layers": self.numberOfLayers,
+			"far": self.far,
+			}
+		)
+
+	def get_rays(self, pose):
 			xCoords = torch.arange(self.width)
 			yCoords = torch.arange(self.height)
 			x, y = torch.meshgrid(xCoords, yCoords)
@@ -51,8 +80,8 @@ class NeRFManager():
 
 
 	def get_rays_with_samples(self, pose):
-		dirs, pos = self.getRays(pose)
-		t = torch.linspace(0, self.far, self.numberOfSamples).reshape(1, 1, self.numberOfSamples, 1).to(device)
+		dirs, pos = self.get_rays(pose)
+		t = torch.linspace(self.near, self.far, self.numberOfSamples).reshape(1, 1, self.numberOfSamples, 1).to(device)
 
 		# dirs has shape (width, height, 3) right now (a direction for every pixel)
 		# We want to instead have a list of numberOfSamples for each pixel, so (width, height, numberOfSamples, 3)
@@ -71,7 +100,7 @@ class NeRFManager():
 			twos = torch.cumprod(twos, dim=4).to(device)
 
 			# Twos is a (3, numberOfFor+, 21) shaped where each row is [1, 2, 4, 8, ...]
-			encoding = rays*math.pi*twos
+			encoding = rays*twos
 			encoding[:, :, :, 0] = torch.sin(encoding[:, :, :, 0])
 			encoding[:, :, :, 1] = torch.cos(encoding[:, :, :, 1])
 			encoding = torch.flatten(encoding, start_dim=3, end_dim=5)
@@ -109,7 +138,7 @@ class NeRFManager():
 				loss = torch.mean((output - target)**2)
 				return loss
 
-		optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+		optimizer = torch.optim.Adam(self.model.parameters(), lr=6e-4)
 		pbar = tqdm(range(epochs))
 
 		best_loss = float("inf")
@@ -133,8 +162,20 @@ class NeRFManager():
 						loss.backward()
 						optimizer.step()
 						loss = 0
+				
+				val_loss = 0
+				with torch.no_grad():
+					for (pose, image) in zip(self.valPoses, self.valImages):
+									pose = pose.to(device)
+									image = image.to(device)
+									rays = self.get_rays_with_samples(pose)
+									pred_image = self.get_image_with_rays(rays)
+									image = image.to(device)
+									val_loss += loss_fn(pred_image, image)
 
-				pbar.set_description(f"Epoch [{epoch+1}/{epochs}], Loss: {epoch_loss}")
-				if(epoch_loss < best_loss):
+				wandb.log({"epoch": epoch, "epoch_loss": epoch_loss, "val_loss": val_loss})
+				pbar.set_description(f"Epoch [{epoch+1}/{epochs}], Loss: {epoch_loss}, Val Loss: {val_loss}")
+
+				if(val_loss < best_loss):
 					torch.save(self.model.state_dict(), filePath)
-					best_loss = epoch_loss
+					best_loss = val_loss
