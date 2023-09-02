@@ -23,5 +23,5 @@ class NeRfModel(nn.Module):
 			x = nn.functional.relu(layer(x))
 
 		rgb = torch.sigmoid(self.rgb_layer(x))
-		radiance = self.radiance_layer(x)
+		radiance = torch.relu(self.radiance_layer(x))
 		return torch.cat([rgb, radiance], dim=-1)

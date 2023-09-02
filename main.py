@@ -22,4 +22,5 @@ width = images.shape[1]
 height = images.shape[2]
 
 nerf = NeRFManager(trainingImages, trainingPoses, focalLength, numberOfSamples=64, far=6, valImages=valImages, valPoses=valPoses)
+
 nerf.train(epochs=10000)

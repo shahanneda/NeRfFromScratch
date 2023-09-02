@@ -12,6 +12,8 @@ from Model import NeRfModel
 from Dataset import NerfDataSet
 from tqdm import tqdm
 from IPython.display import clear_output
+import PIL
+import torchvision.transforms.functional
 import wandb
 
 
@@ -29,13 +31,15 @@ class NeRFManager():
 		self.near = near
 		self.far = far
 		self.numberOfFor = 6
-		self.layerSize = 256
-		self.numberOfLayers = 8
+		self.layerSize = 240
+		self.numberOfLayers = 7
 		self.model = NeRfModel(self.numberOfFor, layer_size=self.layerSize, number_of_layers=self.numberOfLayers).to(device)
 		self.dataSet = NerfDataSet(poses, images)
-		self.dataLoader = DataLoader(dataset=self.dataSet, batch_size=2, shuffle=True )
+		self.batch_size = 2
+		self.dataLoader = DataLoader(dataset=self.dataSet, batch_size=self.batch_size, shuffle=True )
 		self.valImages = valImages
 		self.valPoses = valPoses
+		self.lr = 7e-4
 
 		self.setup_weights_and_bias()
 
@@ -52,7 +56,10 @@ class NeRFManager():
 			"number_of_samples": self.numberOfSamples,
 			"layer_size": self.layerSize,
 			"number_of_layers": self.numberOfLayers,
+			"near": self.near,
 			"far": self.far,
+			"learning_rate": self.lr,
+			"batch_size": self.batch_size,
 			}
 		)
 
@@ -79,7 +86,7 @@ class NeRFManager():
 			return rotatedDirections, originTensor
 
 
-	def get_rays_with_samples(self, pose):
+	def get_sample_points_and_distances(self, pose):
 		dirs, pos = self.get_rays(pose)
 		t = torch.linspace(self.near, self.far, self.numberOfSamples).reshape(1, 1, self.numberOfSamples, 1).to(device)
 
@@ -112,11 +119,11 @@ class NeRFManager():
 			
 
 	def get_image(self, pose):
-		rays = self.get_rays_with_samples(pose)
+		rays = self.get_sample_points_and_distances(pose)
 		return self.get_image_with_rays(rays)
 
 	def get_image_with_rays(self, rays):
-		distanceBetweenSamples = self.far / self.numberOfSamples
+		distanceBetweenSamples = (self.far - self.near) / self.numberOfSamples
 		out = self.get_model_at_each_sample_point(rays)
 		# model_out = (width, height, numberOfSamples, 4), where r is rgb + d
 		deltaI = tensor(distanceBetweenSamples)
@@ -131,14 +138,23 @@ class NeRFManager():
 
 		# Sum along the ray (the first two dimenensions are the width and height)
 		C = torch.sum(Ti*aboservedAmounts * colorI, dim = 2)
+		C = C.rot90(k=-1)
 		return C
 	
-	def train(self, epochs, filePath="./model.pkl"):
+	def get_wb_image(self, img):
+					return wandb.Image(
+							torchvision.transforms.functional.to_pil_image(img.cpu().permute(2, 1, 0)),
+					)
+	
+	def train(self, epochs, filePath="./model.pkl", resumeFromFile=None):
+		if(resumeFromFile):
+			self.model.load_state_dict(torch.load(resumeFromFile))
+
 		def loss_fn(output, target):
 				loss = torch.mean((output - target)**2)
 				return loss
 
-		optimizer = torch.optim.Adam(self.model.parameters(), lr=6e-4)
+		optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 		pbar = tqdm(range(epochs))
 
 		best_loss = float("inf")
@@ -151,7 +167,7 @@ class NeRFManager():
 						pose_batch = pose_batch.to(device)
 						image_batch = image_batch.to(device)
 						for (pose, image) in zip(pose_batch, image_batch):
-								rays = self.get_rays_with_samples(pose)
+								rays = self.get_sample_points_and_distances(pose)
 								pred_image = self.get_image_with_rays(rays)
 
 								image = image.to(device)
@@ -165,16 +181,21 @@ class NeRFManager():
 				
 				val_loss = 0
 				with torch.no_grad():
+					training_img = self.get_wb_image(pred_image)
+					validation_images = []
 					for (pose, image) in zip(self.valPoses, self.valImages):
 									pose = pose.to(device)
 									image = image.to(device)
-									rays = self.get_rays_with_samples(pose)
+									rays = self.get_sample_points_and_distances(pose)
 									pred_image = self.get_image_with_rays(rays)
 									image = image.to(device)
 									val_loss += loss_fn(pred_image, image)
+									validation_images.append(pred_image.cpu())
 
-				wandb.log({"epoch": epoch, "epoch_loss": epoch_loss, "val_loss": val_loss})
-				pbar.set_description(f"Epoch [{epoch+1}/{epochs}], Loss: {epoch_loss}, Val Loss: {val_loss}")
+
+					wandb.log({"epoch": epoch, "epoch_loss": epoch_loss, "val_loss": val_loss})
+					wandb.log({"validation_images": [ self.get_wb_image(img) for img in validation_images], "training_image": training_img})
+					pbar.set_description(f"Epoch [{epoch+1}/{epochs}], Loss: {epoch_loss}, Val Loss: {val_loss}")
 
 				if(val_loss < best_loss):
 					torch.save(self.model.state_dict(), filePath)
