@@ -23,4 +23,4 @@ height = images.shape[2]
 
 nerf = NeRFManager(trainingImages, trainingPoses, focalLength, numberOfSamples=64, far=6, valImages=valImages, valPoses=valPoses)
 
-nerf.train(epochs=10000)
+nerf.train(epochs=10000, resumeFromFile="./model.pkl")

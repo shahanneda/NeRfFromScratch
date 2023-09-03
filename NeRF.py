@@ -17,7 +17,7 @@ import torchvision.transforms.functional
 import wandb
 
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 class NeRFManager():
 	def __init__(self, images, poses, focalLength: float, numberOfSamples: int, near: float = 2, far: float = 6, valImages = None, valPoses = None):
@@ -31,15 +31,15 @@ class NeRFManager():
 		self.near = near
 		self.far = far
 		self.numberOfFor = 6
-		self.layerSize = 240
-		self.numberOfLayers = 7
+		self.layerSize = 256
+		self.numberOfLayers = 8
 		self.model = NeRfModel(self.numberOfFor, layer_size=self.layerSize, number_of_layers=self.numberOfLayers).to(device)
 		self.dataSet = NerfDataSet(poses, images)
-		self.batch_size = 2
+		self.batch_size = 1
 		self.dataLoader = DataLoader(dataset=self.dataSet, batch_size=self.batch_size, shuffle=True )
 		self.valImages = valImages
 		self.valPoses = valPoses
-		self.lr = 7e-4
+		self.lr = 5e-4
 
 		self.setup_weights_and_bias()
 
@@ -69,7 +69,6 @@ class NeRFManager():
 			x, y = torch.meshgrid(xCoords, yCoords)
 
 			xShifted = (x - self.width*0.5)/self.focalLength # x coords in a [width, height] tensor
-
 			yShifted = (y - self.height*0.5)/self.focalLength # y coords in a [width, height] tensor
 
 			z = torch.ones_like(x)  # z coords in a [width, height] tensor
@@ -89,6 +88,15 @@ class NeRFManager():
 	def get_sample_points_and_distances(self, pose):
 		dirs, pos = self.get_rays(pose)
 		t = torch.linspace(self.near, self.far, self.numberOfSamples).reshape(1, 1, self.numberOfSamples, 1).to(device)
+		stepSize = (self.far-self.near)/self.numberOfSamples
+		noise = torch.rand_like(t)*stepSize
+		t = t + noise
+
+
+		dists = t.squeeze(3)[:, :,  1:] - t.squeeze(3)[:, :, : -1]
+		infiniteLastRay = torch.tensor(1e10).broadcast_to(1, 1, 1).to(device)
+		dists = torch.concat([dists, infiniteLastRay], dim=2)
+		dists = dists.broadcast_to((self.width, self.height, self.numberOfSamples))
 
 		# dirs has shape (width, height, 3) right now (a direction for every pixel)
 		# We want to instead have a list of numberOfSamples for each pixel, so (width, height, numberOfSamples, 3)
@@ -96,48 +104,46 @@ class NeRFManager():
 		pos = pos.reshape(self.width, self.height, 1, 3)
 		z = pos + t*dirs
 		z = z.to(device)
-		return z
+		return (z, dists)
 
-	def get_model_at_each_sample_point(self, rays):
+	def get_model_at_each_sample_point(self, samplePoints):
 			#rays is (width, height, numberOfSampels, 3), we want to turn the 3 into 15 by appling foruir feature vectors
-			raysBackup = torch.clone(rays)
-			rays = rays.reshape(self.width, self.height, self.numberOfSamples, 1, 3, 1).expand(self.width, self.height, self.numberOfSamples, 2, 3, 1)
+			originalSamplePoints = torch.clone(samplePoints)
+			samplePoints = samplePoints.reshape(self.width, self.height, self.numberOfSamples, 1, 3, 1).expand(self.width, self.height, self.numberOfSamples, 2, 3, 1)
 			twos = torch.tensor(2).repeat(self.width, self.height, self.numberOfSamples, 2, 3, self.numberOfFor) # 2 since one for sin one for cos
 			twos[:, :, :, :, 0] = 1
 			twos = torch.cumprod(twos, dim=4).to(device)
 
 			# Twos is a (3, numberOfFor+, 21) shaped where each row is [1, 2, 4, 8, ...]
-			encoding = rays*twos
+			encoding = samplePoints*twos
 			encoding[:, :, :, 0] = torch.sin(encoding[:, :, :, 0])
 			encoding[:, :, :, 1] = torch.cos(encoding[:, :, :, 1])
 			encoding = torch.flatten(encoding, start_dim=3, end_dim=5)
 
 			# add non fourer as well (rays backup is just the normal xyz coords)
-			encoding = torch.concat((raysBackup, encoding), dim=3)
+			encoding = torch.concat((originalSamplePoints, encoding), dim=3)
 
 			return self.model(encoding)
 			
 
 	def get_image(self, pose):
-		rays = self.get_sample_points_and_distances(pose)
-		return self.get_image_with_rays(rays)
+		samplePoints, dists = self.get_sample_points_and_distances(pose)
+		return self.get_image_with_sample_points_and_distances(samplePoints, dists)
 
-	def get_image_with_rays(self, rays):
-		distanceBetweenSamples = (self.far - self.near) / self.numberOfSamples
-		out = self.get_model_at_each_sample_point(rays)
-		# model_out = (width, height, numberOfSamples, 4), where r is rgb + d
-		deltaI = tensor(distanceBetweenSamples)
+	def get_image_with_sample_points_and_distances(self, samplePoints, dists):
+		out = self.get_model_at_each_sample_point(samplePoints)
 
-		# Goes from out = (width,height, numberOfSamples, 4) to C = (width, height, 3)
-		# The first two dimenstions are width and height
-		Ti = torch.cumprod(torch.exp(-out[:, : , :, 3]*deltaI), dim = 2)
+		densityFromModel = out[:, :, :, 3]
+		rgbFromModel = out[:, :, :, 0:3]
+
+		expOfAlphaAndDists = torch.exp(-densityFromModel*dists)
+
+		Ti = torch.cumprod(expOfAlphaAndDists, dim = 2)
 		Ti = Ti.reshape(self.width, self.height, self.numberOfSamples, 1)
 
-		aboservedAmounts = (1- torch.exp(-out[:, :, :, 3]*deltaI)).reshape((self.width, self.height, self.numberOfSamples, 1))
-		colorI = out[:, :, :, 0:3]
-
+		absorbedAmounts = (1 - expOfAlphaAndDists).reshape((self.width, self.height, self.numberOfSamples, 1))
 		# Sum along the ray (the first two dimenensions are the width and height)
-		C = torch.sum(Ti*aboservedAmounts * colorI, dim = 2)
+		C = torch.sum(Ti*absorbedAmounts * rgbFromModel, dim = 2)
 		C = C.rot90(k=-1)
 		return C
 	
@@ -148,6 +154,7 @@ class NeRFManager():
 	
 	def train(self, epochs, filePath="./model.pkl", resumeFromFile=None):
 		if(resumeFromFile):
+			print("Resuming from: ", resumeFromFile)
 			self.model.load_state_dict(torch.load(resumeFromFile))
 
 		def loss_fn(output, target):
@@ -158,8 +165,8 @@ class NeRFManager():
 		pbar = tqdm(range(epochs))
 
 		best_loss = float("inf")
-		loss = 0
 		for epoch in pbar: 
+				loss = 0
 				epoch_loss = 0
 				torch.cuda.empty_cache()
 
@@ -167,9 +174,7 @@ class NeRFManager():
 						pose_batch = pose_batch.to(device)
 						image_batch = image_batch.to(device)
 						for (pose, image) in zip(pose_batch, image_batch):
-								rays = self.get_sample_points_and_distances(pose)
-								pred_image = self.get_image_with_rays(rays)
-
+								pred_image = self.get_image(pose)
 								image = image.to(device)
 								loss += loss_fn(pred_image, image)
 								epoch_loss += loss.item()
@@ -186,8 +191,7 @@ class NeRFManager():
 					for (pose, image) in zip(self.valPoses, self.valImages):
 									pose = pose.to(device)
 									image = image.to(device)
-									rays = self.get_sample_points_and_distances(pose)
-									pred_image = self.get_image_with_rays(rays)
+									pred_image = self.get_image(pose)
 									image = image.to(device)
 									val_loss += loss_fn(pred_image, image)
 									validation_images.append(pred_image.cpu())
